@@ -1,0 +1,48 @@
+# ShaffofAI audit bot.
+#
+#     cp .env.example .env && nano .env && chmod 600 .env
+#     docker compose pull && docker compose up -d       # the image CI published
+#     docker compose up -d --build                      # or build it here
+#
+# It joins the platform's network (created by shaffofai-gateway's compose) and
+# reaches the gateway as gateway:8000 and tender-v2 as tender-v2:8000. It opens
+# no port: Telegram is asked for messages (long polling), never the other way.
+# Its only outside connection is to api.telegram.org.
+name: shaffofai-v2-auditbot
+
+services:
+  auditbot:
+    image: "${IMAGE:-ghcr.io/shaffofai/shaffofai-auditbot}:${TAG:-latest}"
+    build: .
+    container_name: shaffofai-v2-auditbot
+    restart: unless-stopped
+    env_file: .env
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m
+    volumes:
+      # Where the alert loop stopped reading, so a restart neither repeats nor
+      # skips alerts.
+      - state:/state
+    networks: [shaffofai-v2]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    deploy:
+      resources:
+        limits:
+          # An export of 20 000 rows is built in memory (Excel + JSON).
+          memory: "${MEMORY_LIMIT:-512M}"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+volumes:
+  state:
+
+networks:
+  shaffofai-v2:
+    external: true
+    name: shaffofai-v2

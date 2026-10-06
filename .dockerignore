@@ -1,0 +1,19 @@
+# The Dockerfile copies auditbot/ and requirements.txt only; this is the second layer.
+.env
+.env.*
+*.env
+secrets
+.git
+.github
+tests/
+state/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.md
+*.xlsx
+.idea/
+.vscode/
+.claude/

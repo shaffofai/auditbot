@@ -1,0 +1,20 @@
+# Secrets. A key that reached history is not removed — it is replaced.
+.env
+.env.*
+!.env.example
+*.env
+secrets/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+state/
+*.xlsx
+
+.idea/
+.vscode/
+.claude/
+.DS_Store

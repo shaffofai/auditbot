@@ -1,9 +1,10 @@
 """The bot itself: Telegram long polling for commands, a loop that follows both
 logs for alerts, and a heartbeat file for the container healthcheck.
 
-Who may use it: only the chats listed in ALLOWED_CHAT_IDS. Everything else is
-ignored, except ``/id``, which tells any chat its own id (that is how a new
-chat is added). Alerts go to ALERT_CHAT_IDS.
+Who may use it is decided in the dashboard (``auditbot.chats``): a chat that
+writes to the bot, or a group the bot is added to, appears there as a request;
+an admin approves or blocks it and chooses which approved chats get alerts.
+Until then the bot answers only ``/id`` and says the request is waiting.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from typing import Any, Callable
 
 from auditbot import export, query, texts
 from auditbot.alerts import Alerts
+from auditbot.chats import Chats, request_notice
 from auditbot.config import Settings
 from auditbot.sources import Platform, SourceError, Tender
 from auditbot.telegram import DOCUMENT_MAX_BYTES, Telegram, TelegramError
@@ -31,6 +33,8 @@ XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 AUTH_BACKOFF = 600            # seconds to wait after a source refused the credentials
 MAX_BACKOFF = 300
 DOWN_AFTER = 3                # consecutive failures before the chat is told
+PENDING_TOLD_EVERY = 60       # a waiting chat is reminded at most this often
+MEMBER = ("member", "administrator", "creator")
 FILE_LIMIT = DOCUMENT_MAX_BYTES - 1024 * 1024
 
 
@@ -101,6 +105,8 @@ class Bot:
         self.clock = clock
         self.now = now
         self.state = State(settings.state_path)
+        self.chats = Chats(platform, self.state, clock)
+        self.pending_told: dict[int, float] = {}
         self.alerts = Alerts(tz=settings.tz, window=settings.alert_window,
                              failed_logins=settings.alert_failed_logins,
                              browser_errors=settings.alert_browser_errors,
@@ -127,9 +133,9 @@ class Bot:
 
     async def run(self) -> None:
         try:
-            await self.tg.commands([("loglar", "Loglarni Excel va JSON qilib olish"),
-                                    ("holat", "Bot va manbalar holati"),
-                                    ("yordam", "Qanday ishlatiladi"),
+            await self.tg.commands([("logs", "Loglarni Excel va JSON qilib olish"),
+                                    ("status", "Bot va manbalar holati"),
+                                    ("help", "Qanday ishlatiladi"),
                                     ("id", "Shu chatning ID raqami")])
         except TelegramError as exc:
             log.warning("setMyCommands failed: %s", exc.description)
@@ -137,11 +143,11 @@ class Bot:
                  asyncio.create_task(self.heartbeat(), name="heartbeat")]
         if self.s.alerts_enabled:
             tasks.append(asyncio.create_task(self.follow(), name="alerts"))
-        if not self.s.allowed_chats:
-            log.warning("ALLOWED_CHAT_IDS is empty: setup mode, only /id is answered. "
-                        "Send /id to the bot from each chat, put the ids in .env, start again.")
-        log.info("auditbot running: %d allowed chat(s), alerts %s, tender-v2 %s",
-                 len(self.s.allowed_chats), "on" if self.s.alerts_enabled else "off",
+        await self.chats.refresh()
+        counts = self.chats.counts()
+        log.info("auditbot running: %d approved chat(s), %d waiting, alerts %s, tender-v2 %s",
+                 counts["approved"], counts["pending"],
+                 "on" if self.s.alerts_enabled else "off",
                  "on" if self.tender is not None else "off")
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
         for task in pending:
@@ -180,37 +186,101 @@ class Bot:
                     log.exception("update %s failed", update.get("update_id"))
 
     async def handle(self, update: dict) -> None:
+        if "my_chat_member" in update:
+            await self.member_changed(update["my_chat_member"])
+            return
         if "callback_query" in update:
             cq = update["callback_query"]
-            chat_id = ((cq.get("message") or {}).get("chat") or {}).get("id")
+            chat = (cq.get("message") or {}).get("chat") or {}
             await self.tg.answer(cq.get("id", ""))
             data = cq.get("data") or ""
-            if chat_id in self.s.allowed_chats and data.startswith("q:"):
-                self.start_export(chat_id, data[2:])
+            if (isinstance(chat.get("id"), int) and data.startswith("q:")
+                    and await self.chats.status(chat["id"]) == "approved"):
+                self.start_export(chat["id"], data[2:])
             return
         message = update.get("message") or {}
-        chat_id = (message.get("chat") or {}).get("id")
-        text = (message.get("text") or "").strip()
-        if chat_id is None or not text.startswith("/"):
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        if not isinstance(chat_id, int):
             return
+        if isinstance(message.get("migrate_from_chat_id"), int):
+            # The group became a supergroup, with a new id: the decision moves with it.
+            await self.chats.report(chat, migrated_from=message["migrate_from_chat_id"], force=True)
+            return
+        text = (message.get("text") or "").strip()
+        if not text.startswith("/"):
+            if chat.get("type") == "private" and text:
+                # A person writing to the bot without a command: the same as /start.
+                text = "/start"
+            else:
+                return
         command, _, args = text.partition(" ")
         command = command[1:].split("@", 1)[0].lower()
         if command == "id":
             await self.reply_id(chat_id)
+            answer = await self.chats.report(chat)
+            if answer and answer.get("created"):
+                await self.tell_admins(answer["chat"])
             return
-        if chat_id not in self.s.allowed_chats:
-            log.info("ignored /%s from chat %s (not in ALLOWED_CHAT_IDS)", command[:32], chat_id)
+        status = await self.chats.status(chat_id)
+        if status != "approved":
+            log.info("/%s from chat %s (%s)", command[:32], chat_id, status or "unknown")
+            await self.not_approved(chat, status)
             return
-        if command in ("start", "yordam", "help"):
+        await self.chats.report(chat)                      # keeps name and last-seen current
+        if command in ("start", "help"):
             await self.tg.send(chat_id, texts.HELP.format(bodies=self.s.export_max_bodies),
                                keyboard=self.quick())
-        elif command == "loglar":
+        elif command == "logs":
             if args.strip():
                 self.start_export(chat_id, args)
             else:
                 await self.tg.send(chat_id, texts.ASK_RANGE, keyboard=self.quick())
-        elif command == "holat":
+        elif command == "status":
             await self.tg.send(chat_id, await self.status())
+
+    async def not_approved(self, chat: dict, status: str | None) -> None:
+        """A chat the dashboard has not approved. Blocked: silence. Otherwise
+        its request is (re)registered, the admins hear of a new one, and the
+        chat is told — at most once a minute — that it is waiting."""
+        if status == "blocked":
+            return
+        answer = await self.chats.report(chat)
+        if answer and answer.get("created"):
+            await self.tell_admins(answer["chat"])
+        known = self.chats.known.get(chat["id"])
+        if known and known.get("status") == "blocked":
+            return
+        now = self.clock()
+        if now - self.pending_told.get(chat["id"], -1e9) < PENDING_TOLD_EVERY:
+            return
+        self.pending_told[chat["id"]] = now
+        if len(self.pending_told) > 1000:
+            self.pending_told = {c: t for c, t in self.pending_told.items()
+                                 if now - t < PENDING_TOLD_EVERY}
+        # Not known even after reporting: the gateway did not answer, so no
+        # request was registered — say so rather than promise one.
+        message = texts.PENDING if known else texts.UNAVAILABLE
+        await self._send_quietly(chat["id"], message.format(chat_id=chat["id"]))
+
+    async def member_changed(self, change: dict) -> None:
+        """The bot was added to or removed from a group, or a person blocked or
+        unblocked it. Recorded in the chat list either way; a group that adds
+        the bot becomes a request at once."""
+        chat = change.get("chat") or {}
+        if not isinstance(chat.get("id"), int):
+            return
+        new = change.get("new_chat_member") or {}
+        member = new.get("status") in MEMBER or (new.get("status") == "restricted"
+                                                 and new.get("is_member", False))
+        answer = await self.chats.report(chat, bot_member=member, force=True)
+        if not member or not answer:
+            return
+        if answer.get("created"):
+            await self.tell_admins(answer["chat"])
+        if (answer.get("chat") or {}).get("status") == "pending" and chat.get("type") != "private":
+            self.pending_told[chat["id"]] = self.clock()
+            await self._send_quietly(chat["id"], texts.PENDING.format(chat_id=chat["id"]))
 
     def quick(self) -> list[list[dict]]:
         return [[{"text": label, "callback_data": "q:" + value} for label, value in row]
@@ -238,6 +308,9 @@ class Bot:
                 lines.append(f"{name}: ✅ ishlayapti, oxirgi yozuv #{head}")
             except SourceError as exc:
                 lines.append(f"{name}: ❌ {html.escape(exc.message, quote=False)}")
+        counts = self.chats.counts()
+        lines.append(f"Chatlar: {counts['approved']} ta ruxsat etilgan, {counts['alerts']} tasi "
+                     f"ogohlantirish oladi, {counts['pending']} ta so'rov kutmoqda")
         if self.s.alerts_enabled:
             cursors = ", ".join(f"{f.name} #{self.state.get(f.key)}" for f in self.followers)
             lines.append(f"Ogohlantirishlar: yoqilgan, har {self.s.alert_interval} soniyada "
@@ -431,9 +504,22 @@ class Bot:
             await self.broadcast([texts.ALERT_SOURCE_DOWN.format(
                 source=f.name, why=html.escape(exc.message, quote=False))])
 
-    async def broadcast(self, messages: list[str]) -> None:
+    async def tell_admins(self, chat: dict) -> None:
+        """Someone asked for access: the alert chats hear of it."""
+        await self.broadcast([request_notice(chat, texts.CHAT_KINDS)], fresh=True)
+
+    async def broadcast(self, messages: list[str], *, fresh: bool = False) -> None:
         if not messages:
             return
+        targets = await self.chats.alert_targets(fresh=fresh)
+        if not targets:
+            log.info("%d alert(s) not sent: no approved chat has alerts on", len(messages))
+            return
         for text in self.alerts.limit(messages):
-            for chat_id in sorted(self.s.alert_chats):
-                await self._send_quietly(chat_id, text)
+            for chat_id in targets:
+                try:
+                    await self.tg.send(chat_id, text)
+                except TelegramError as exc:
+                    log.warning("alert to chat %s failed: %s", chat_id, exc.description)
+                    if exc.gone:
+                        await self.chats.gone(chat_id)

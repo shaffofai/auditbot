@@ -52,8 +52,55 @@ class FakePlatform:
     def __init__(self, user="audit-bot", password="secret-1"):
         self.user, self.password = user, password
         self.rows: list[dict] = []
-        self.calls: list[dict] = []
-        self.fail_with: int | None = None
+        self.calls: list[dict] = []           # the audit API only
+        self.fail_with: int | None = None     # the audit API only
+        # telegram_chats, behind /admin/gateway/telegram/chats
+        self.chats: dict[int, dict] = {}
+        self.chat_calls: list[dict] = []
+        self.chats_fail_with: int | None = None
+
+    def chat(self, chat_id, *, status="approved", alerts=False, chat_type=None, title=None,
+             bot_member=True) -> dict:
+        """A row as an admin left it in the dashboard."""
+        row = {"chat_id": chat_id, "chat_type": chat_type or ("private" if chat_id > 0 else "supergroup"),
+               "title": title, "username": None, "status": status, "alerts": alerts,
+               "bot_member": bot_member, "note": None, "created_at": at(0),
+               "last_seen_at": None, "decided_by": "admin", "decided_at": at(0)}
+        self.chats[chat_id] = row
+        return row
+
+    def handle_chats(self, request: httpx.Request) -> httpx.Response:
+        """The gateway's apis/telegram.py, as far as the bot uses it."""
+        path = request.url.path
+        body = json.loads(request.read() or b"{}") if request.method == "POST" else None
+        self.chat_calls.append({"method": request.method, "path": path, "body": body})
+        if _basic(request) != (self.user, self.password):
+            return httpx.Response(401, json={"detail": "Invalid credentials"})
+        if self.chats_fail_with:
+            return httpx.Response(self.chats_fail_with, json={"detail": "fake failure"})
+        if request.method == "GET" and path == "/admin/gateway/telegram/chats":
+            order = {"pending": 0, "approved": 1}
+            rows = sorted(self.chats.values(), key=lambda r: order.get(r["status"], 2))
+            return httpx.Response(200, json={"chats": rows})
+        if request.method == "POST" and path == "/admin/gateway/telegram/chats/seen":
+            allowed = {"chat_id", "chat_type", "title", "username", "bot_member", "migrated_from"}
+            if set(body) - allowed or body.get("chat_type") not in (
+                    "private", "group", "supergroup", "channel"):
+                return httpx.Response(422, json={"detail": "bad report"})
+            chat_id = body["chat_id"]
+            created = chat_id not in self.chats
+            row = self.chats.get(chat_id) or self.chat(chat_id, status="pending",
+                                                       chat_type=body["chat_type"])
+            row.update(chat_type=body["chat_type"], title=body.get("title"),
+                       username=body.get("username"), bot_member=body.get("bot_member", True),
+                       last_seen_at=at(1))
+            old = self.chats.pop(body.get("migrated_from"), None) if body.get("migrated_from") else None
+            if old:
+                if row["status"] == "pending":
+                    row.update(status=old["status"], alerts=old["alerts"])
+                created = False
+            return httpx.Response(200, json={"chat": row, "created": created})
+        return httpx.Response(404, json={"detail": "Not Found"})
 
     def add(self, **row) -> dict:
         row.setdefault("id", len(self.rows) + 1)
@@ -70,6 +117,8 @@ class FakePlatform:
         return httpx.MockTransport(self.handle)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/admin/gateway/telegram/"):
+            return self.handle_chats(request)
         params = {k: v[-1] for k, v in parse_qs(request.url.query.decode(), keep_blank_values=True).items()}
         self.calls.append({"path": request.url.path, "params": params})
         if _basic(request) != (self.user, self.password):
@@ -213,6 +262,7 @@ class FakeTelegram:
         self.sent: list[dict] = []
         self.documents: list[dict] = []
         self.updates: list[dict] = []
+        self.blocked_by: set[int] = set()      # chats that blocked the bot or removed it
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -245,6 +295,9 @@ class FakeTelegram:
             return httpx.Response(200, json={"ok": True, "result": {}})
         data = json.loads(request.read() or b"{}")
         if method == "sendMessage":
+            if data["chat_id"] in self.blocked_by:
+                return httpx.Response(403, json={"ok": False, "error_code": 403, "description":
+                                                 "Forbidden: bot was blocked by the user"})
             if data.get("parse_mode") == "HTML" and "<x>" in data["text"]:
                 return httpx.Response(400, json={"ok": False, "description":
                                                  "Bad Request: can't parse entities: unsupported tag"})

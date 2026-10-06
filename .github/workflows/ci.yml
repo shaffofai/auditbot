@@ -74,7 +74,7 @@ jobs:
           docker run -d --name bot --read-only --tmpfs /tmp:size=8m \
             --health-interval 5s --health-start-period 5s \
             -e TELEGRAM_BOT_TOKEN=000:ci -e TELEGRAM_API_URL=http://127.0.0.1:9 \
-            -e ALLOWED_CHAT_IDS=1 -e PLATFORM_URL=http://127.0.0.1:9 \
+            -e PLATFORM_URL=http://127.0.0.1:9 \
             -e PLATFORM_USERNAME=ci -e PLATFORM_PASSWORD=ci \
             "${{ steps.img.outputs.name }}:sha-${{ github.sha }}"
           for _ in $(seq 1 30); do

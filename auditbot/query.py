@@ -1,24 +1,26 @@
-"""What ``/loglar …`` asks for: a time range and filters, in Uzbek.
+"""What ``/logs …`` asks for: a time range and filters. What a person types
+is English; what the bot answers (these error messages too) is Uzbek.
 
-    /loglar bugun                          today, from 00:00 Tashkent until now
-    /loglar kecha                          all of yesterday
-    /loglar 3soat   /loglar 30daqiqa       the last three hours / thirty minutes
-    /loglar 2kun    /loglar 1hafta         the last two days / one week
-    /loglar 2026-10-01                     that whole day (also 01.10.2026, 01.10)
-    /loglar 2026-10-01 09:00 18:00         that day, 09:00 to 18:00
-    /loglar 01.10 09:00 02.10 12:00        from one moment to another
-    /loglar 09:00 12:30                    today, between two times
+    /logs today                         from 00:00 Tashkent until now
+    /logs yesterday                     all of yesterday
+    /logs 3h   /logs 30m                the last three hours / thirty minutes
+    /logs 2d   /logs 1w                 the last two days / one week
+                                        (also "3 hours", "30min", "2days", "1week")
+    /logs 2026-10-01                    that whole day (also 01.10.2026, 01.10)
+    /logs 2026-10-01 09:00 18:00        that day, 09:00 to 18:00
+    /logs 01.10 09:00 02.10 12:00       from one moment to another
+    /logs 09:00 12:30                   today, between two times
 
 followed by any of
 
-    xatolar                 only level=error
-    tanalar                 also fetch request/response bodies (first N rows)
-    tur=sorov|kirish|brauzer|log|qolda
-    daraja=xato|ogohlantirish|info
-    foydalanuvchi=<e-mail or username>
-    yol=/api-v2/fasad       path prefix
-    holat=500               HTTP status
-    xizmat=fasad|gateway|…|platforma|tender-v2
+    errors                  only level=error
+    bodies                  also fetch request/response bodies (first N rows)
+    kind=request|auth|browser|log|manual
+    level=error|warning|info
+    user=<e-mail or username>
+    path=/api-v2/fasad      path prefix
+    status=500              HTTP status
+    service=fasad|gateway|…|platform|tender-v2
 
 Times are Tashkent time (the offset comes from the settings); the range is
 [start, end), as both APIs treat it.
@@ -48,39 +50,27 @@ class Query:
     filters_label: str = ""
 
 
-_APOSTROPHES = str.maketrans("", "", "'ʻʼ‘’`´")
-
 _UNITS = {
-    "daqiqa": 60, "min": 60, "m": 60,
-    "soat": 3600, "s": 3600, "h": 3600,
-    "kun": 86400, "d": 86400,
-    "hafta": 604800, "w": 604800,
+    "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+    "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+    "d": 86400, "day": 86400, "days": 86400,
+    "w": 604800, "week": 604800, "weeks": 604800,
 }
-_SPAN = re.compile(r"^(\d{1,4})(daqiqa|min|soat|kun|hafta|[mshdw])$")
+_SPAN = re.compile(r"^(\d{1,4})(" + "|".join(sorted(_UNITS, key=len, reverse=True)) + r")$")
 
-_KINDS = {   # what the user types -> (platform kind, tender tur or None)
-    "sorov": ("request", "sorov"), "request": ("request", "sorov"),
-    "kirish": ("auth", "kirish"), "auth": ("auth", "kirish"),
-    "brauzer": ("client", None), "client": ("client", None),
+_KINDS = {   # what the user types -> (platform kind, tender-v2 tur or None)
+    "request": ("request", "sorov"),
+    "auth": ("auth", "kirish"),
+    "browser": ("client", None),
     "log": ("log", "log"),
-    "qolda": ("manual", "amal"), "manual": ("manual", "amal"), "amal": ("manual", "amal"),
+    "manual": ("manual", "amal"),
 }
-_LEVELS = {
-    "xato": "error", "xatolar": "error", "error": "error",
-    "ogohlantirish": "warning", "warning": "warning",
-    "info": "info", "malumot": "info",
-}
-_KEYS = {
-    "tur": "tur", "daraja": "daraja",
-    "foydalanuvchi": "foydalanuvchi", "user": "foydalanuvchi", "login": "foydalanuvchi",
-    "yol": "yol", "path": "yol",
-    "holat": "holat", "status": "holat",
-    "xizmat": "xizmat", "manba": "xizmat",
-}
+_LEVELS = ("error", "warning", "info")
+_KEYS = ("kind", "level", "user", "path", "status", "service")
 
 
 def _plain(word: str) -> str:
-    return word.translate(_APOSTROPHES).lower()
+    return word.lower()
 
 
 def _parse_date(token: str, today: date) -> date | None:
@@ -128,11 +118,11 @@ def _range(tokens: list[str], now: datetime, tz: tzinfo) -> tuple[datetime, date
     words = [_plain(t) for t in tokens]
     if not words:
         raise QueryError("Oraliq ko'rsatilmagan.")
-    if words == ["bugun"]:
+    if words == ["today"]:
         return at(today), now
-    if words == ["kecha"]:
+    if words == ["yesterday"]:
         return at(today - timedelta(days=1)), at(today)
-    # "3soat" or "3 soat".
+    # "3h" or "3 hours".
     span = None
     if len(words) == 1:
         span = _SPAN.match(words[0])
@@ -179,7 +169,7 @@ def _range(tokens: list[str], now: datetime, tz: tzinfo) -> tuple[datetime, date
 
 
 def parse(text: str, *, now: datetime, tz: tzinfo) -> Query:
-    """The arguments of ``/loglar`` (without the command itself)."""
+    """The arguments of ``/logs`` (without the command itself)."""
     tokens = text.split()
     range_tokens: list[str] = []
     platform: dict[str, Any] = {}
@@ -190,56 +180,56 @@ def parse(text: str, *, now: datetime, tz: tzinfo) -> Query:
 
     for token in tokens:
         word = _plain(token)
-        if word in ("xatolar", "xato"):
+        if word == "errors":
             platform["level"] = tender["daraja"] = "error"
-            labels.append("faqat xatolar")
+            labels.append("errors")
             continue
-        if word in ("tanalar", "tana"):
+        if word == "bodies":
             bodies = True
-            labels.append("tanalar bilan")
+            labels.append("bodies")
             continue
         if "=" not in token:
             range_tokens.append(token)
             continue
         raw_key, value = token.split("=", 1)
-        key = _KEYS.get(_plain(raw_key))
+        key = _plain(raw_key)
         value = value.strip()
-        if not key or not value:
-            raise QueryError(f"Noma'lum filtr: {token}")
+        if key not in _KEYS or not value:
+            raise QueryError(f"Noma'lum filtr: {token} (bor filtrlar: {', '.join(_KEYS)})")
         plain_value = _plain(value)
-        if key == "tur":
+        if key == "kind":
             if plain_value not in _KINDS:
-                raise QueryError("tur= qiymatlari: sorov, kirish, brauzer, log, qolda")
+                raise QueryError("kind= qiymatlari: " + ", ".join(_KINDS))
             kind, tur = _KINDS[plain_value]
             platform["kind"] = kind
             if tur:
                 tender["tur"] = tur
             else:
                 use_tender = False             # tender-v2 has no browser events
-        elif key == "daraja":
+        elif key == "level":
             if plain_value not in _LEVELS:
-                raise QueryError("daraja= qiymatlari: xato, ogohlantirish, info")
-            platform["level"] = tender["daraja"] = _LEVELS[plain_value]
-        elif key == "foydalanuvchi":
+                raise QueryError("level= qiymatlari: " + ", ".join(_LEVELS))
+            platform["level"] = tender["daraja"] = plain_value
+        elif key == "user":
             platform["username"] = value
             tender["login"] = value
-        elif key == "yol":
+        elif key == "path":
             if not value.startswith("/"):
-                raise QueryError("yol= / bilan boshlanishi kerak, masalan yol=/api-v2/fasad")
+                raise QueryError("path= / bilan boshlanishi kerak, masalan path=/api-v2/fasad")
             platform["path"] = tender["yol"] = value
-        elif key == "holat":
+        elif key == "status":
             if not value.isdigit():
-                raise QueryError("holat= raqam bo'lishi kerak, masalan holat=500")
+                raise QueryError("status= raqam bo'lishi kerak, masalan status=500")
             platform["status"] = tender["holat_kodi"] = int(value)
-        elif key == "xizmat":
+        elif key == "service":
             if plain_value in ("tender-v2", "tenderv2", "tender_v2"):
                 use_platform = False
-            elif plain_value == "platforma":
+            elif plain_value == "platform":
                 use_tender = False
             else:
                 platform["source"] = plain_value
                 use_tender = False
-        labels.append(f"{raw_key}={value}")
+        labels.append(f"{key}={value}")
 
     if not use_platform and not use_tender:
         raise QueryError("Bu filtrlar bilan hech qaysi manba qolmadi.")

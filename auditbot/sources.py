@@ -58,12 +58,18 @@ class _Http:
         await self._client.aclose()
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        """GET, retried twice when the server says it is busy (503). The messages
-        of the errors are shown in the chat, so they are Uzbek."""
+        return await self._request("GET", path, params=params)
+
+    async def _request(self, method: str, path: str, *, params: dict[str, Any] | None = None,
+                       body: dict[str, Any] | None = None) -> Any:
+        """One call, retried twice when the server says it is busy (503). A 404
+        is ``None``. The messages of the errors are shown in the chat, so they
+        are Uzbek."""
         for attempt in range(3):
             try:
-                response = await self._client.get(self._base + path, params=params,
-                                                  headers={"Authorization": self._auth})
+                response = await self._client.request(method, self._base + path, params=params,
+                                                      json=body,
+                                                      headers={"Authorization": self._auth})
             except httpx.HTTPError as exc:
                 raise SourceError(self.name, f"ulanib bo'lmadi ({type(exc).__name__})") from None
             status = response.status_code
@@ -146,6 +152,22 @@ class Platform(_Http):
 
     async def row(self, row_id: int) -> dict | None:
         return await self._get(f"/admin/gateway/audit/{int(row_id)}")
+
+    # The bot's chat list (telegram_chats, managed in the dashboard).
+
+    CHATS = "/admin/gateway/telegram/chats"
+
+    async def chats(self) -> list[dict]:
+        page = await self._page(self.CHATS, {})
+        return page["chats"]
+
+    async def chat_seen(self, report: dict[str, Any]) -> dict:
+        """Report a chat that wrote to the bot, or that it joined or left.
+        Answers ``{"chat": {...}, "created": bool}``."""
+        answer = await self._request("POST", self.CHATS + "/seen", body=report)
+        if not isinstance(answer, dict):
+            raise SourceError(self.name, f"{self.CHATS} topilmadi (404) — gateway eskimi?")
+        return answer
 
 
 class Tender(_Http):

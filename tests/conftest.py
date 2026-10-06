@@ -17,7 +17,6 @@ def make_settings(tmp_path):
     def make(**over) -> Settings:
         values = dict(
             telegram_token="123:test", telegram_api="https://tg.test",
-            allowed_chats=frozenset({111, -1002}), alert_chats=frozenset({-1002}),
             platform_url="http://gateway.test", platform_user="audit-bot",
             platform_password="secret-1",
             tender_url="http://tender.test", tender_user="jurnal-oquvchi", tender_password="x" * 24,

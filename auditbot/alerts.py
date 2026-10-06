@@ -16,7 +16,7 @@ hands every new row to :class:`Alerts`. What makes a message:
 The same thing happening again within the window is counted, not repeated: the
 next message about it, after the window, says how many times it was suppressed.
 And whatever a burst produces, at most ``alert_max_per_minute`` messages leave
-per minute; the rest are folded into one line pointing at /loglar.
+per minute; the rest are folded into one line pointing at /logs.
 
 Not alerted: failed sign-ins by address. Until router/realip.conf is filled in
 every visitor has the company edge's address (HANDOFF §5.3), so "many failures
@@ -249,7 +249,7 @@ class Alerts:
             out = messages[:room - 1]                # one place for the notice
             self._held += len(messages) - len(out)
             out.append(f"⏸ Yana {self._held} ta ogohlantirish yuborilmadi (daqiqasiga "
-                       f"{self.max_per_minute} tadan ko'p). Batafsil: /loglar 10daqiqa xatolar")
+                       f"{self.max_per_minute} tadan ko'p). Batafsil: /logs 10m errors")
             self._held = 0
         for _ in out:
             self._sent.append(now)

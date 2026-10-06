@@ -28,11 +28,20 @@ DOCUMENT_MAX_BYTES = 50 * 1024 * 1024
 class TelegramError(Exception):
     """A call Telegram refused. Carries the method and Telegram's description only."""
 
-    def __init__(self, method: str, description: str, *, retry_after: float | None = None):
+    def __init__(self, method: str, description: str, *, retry_after: float | None = None,
+                 code: int | None = None):
         super().__init__(f"{method}: {description}")
         self.method = method
         self.description = description
         self.retry_after = retry_after
+        self.code = code                       # Telegram's error_code: 403 = blocked / removed
+
+    @property
+    def gone(self) -> bool:
+        """The chat cannot be written to any more: the person blocked the bot,
+        the bot was removed from the group, or the chat no longer exists."""
+        text = self.description.lower()
+        return self.code == 403 or "chat not found" in text or "upgraded to a supergroup" in text
 
 
 class Telegram:
@@ -69,12 +78,14 @@ class Telegram:
                 await asyncio.sleep(min(float(retry_after), 60.0))
                 continue
             raise TelegramError(method, str(body.get("description") or response.status_code),
-                                retry_after=retry_after)
+                                retry_after=retry_after, code=body.get("error_code"))
         raise AssertionError("unreachable")
 
     async def updates(self, offset: int | None, timeout: int = 50) -> list[dict]:
         data: dict[str, Any] = {"timeout": timeout,
-                                "allowed_updates": ["message", "callback_query"]}
+                                # my_chat_member: the bot was added to or removed from a
+                                # group, or a person blocked or unblocked it.
+                                "allowed_updates": ["message", "callback_query", "my_chat_member"]}
         if offset is not None:
             data["offset"] = offset
         return await self.call("getUpdates", data=data, timeout=timeout + 15)

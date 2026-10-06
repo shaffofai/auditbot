@@ -39,26 +39,10 @@ def _number(name: str, default: int, *, minimum: int = 0) -> int:
     return value
 
 
-def _ids(name: str, default: str = "") -> frozenset[int]:
-    raw = os.environ.get(name, "").strip() or default     # `NAME=` in .env means the default
-    out = set()
-    for part in raw.replace(";", ",").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            out.add(int(part))
-        except ValueError:
-            raise ConfigError(f"auditbot: {name} holds a value that is not a chat id: {part!r}") from None
-    return frozenset(out)
-
-
 @dataclass(frozen=True)
 class Settings:
     telegram_token: str = field(repr=False)
     telegram_api: str
-    allowed_chats: frozenset[int]
-    alert_chats: frozenset[int]
 
     platform_url: str
     platform_user: str
@@ -81,7 +65,7 @@ class Settings:
     alert_catchup_rows: int      # after a long outage, skip ahead instead of replaying more than this
 
     export_max_rows: int         # per source
-    export_max_bodies: int       # rows whose bodies are fetched one by one when `tanalar` is asked
+    export_max_bodies: int       # rows whose bodies are fetched one by one when `bodies` is asked
 
     @property
     def tender_enabled(self) -> bool:
@@ -89,23 +73,22 @@ class Settings:
 
     @property
     def alerts_enabled(self) -> bool:
-        return bool(self.alert_chats) and self.alert_interval > 0
+        return self.alert_interval > 0
+
+
+# Which chats may use the bot, and which get alerts, used to be lists here.
+# They are decided in the dashboard now (telegram_chats); these are ignored.
+OBSOLETE = ("ALLOWED_CHAT_IDS", "ALERT_CHAT_IDS")
+
+
+def obsolete_settings() -> list[str]:
+    return [name for name in OBSOLETE if os.environ.get(name, "").strip()]
 
 
 def load() -> Settings:
-    # Empty is allowed on purpose: the first start, when nobody knows a chat id
-    # yet. The bot then answers /id only (setup mode) and sends no alerts.
-    allowed = _ids("ALLOWED_CHAT_IDS")
-    alerts = _ids("ALERT_CHAT_IDS", ",".join(str(i) for i in sorted(allowed)))
-    stray = alerts - allowed
-    if stray:
-        raise ConfigError("auditbot: ALERT_CHAT_IDS must be a subset of ALLOWED_CHAT_IDS "
-                          f"(not allowed: {', '.join(str(i) for i in sorted(stray))})")
     return Settings(
         telegram_token=_text("TELEGRAM_BOT_TOKEN", required=True),
         telegram_api=_text("TELEGRAM_API_URL", "https://api.telegram.org").rstrip("/"),
-        allowed_chats=allowed,
-        alert_chats=alerts,
         platform_url=_text("PLATFORM_URL", "http://gateway:8000").rstrip("/"),
         platform_user=_text("PLATFORM_USERNAME", required=True),
         platform_password=_text("PLATFORM_PASSWORD", required=True),

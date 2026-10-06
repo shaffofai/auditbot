@@ -20,6 +20,9 @@ def main() -> None:
     for noisy in ("httpx", "httpcore"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     settings = config.load()
+    for name in config.obsolete_settings():
+        logging.getLogger("auditbot").warning(
+            "%s in .env is ignored: chats are managed in the dashboard (Telegram bot tab)", name)
     asyncio.run(_run(settings))
 
 

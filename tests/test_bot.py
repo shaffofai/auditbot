@@ -34,6 +34,9 @@ class World:
         self.tender = FakeTender(settings.tender_user, settings.tender_password)
         self.clock = Clock()
         self.with_tender = tender
+        # As an admin left them in the dashboard: a person, and the alert group.
+        self.platform.chat(111, title="Ali Valiyev")
+        self.platform.chat(-1002, title="Audit", alerts=True)
 
     def bot(self) -> Bot:
         s = self.settings
@@ -48,8 +51,15 @@ class World:
                    clock=self.clock, now=lambda: NOW)
 
 
+def chat_of(chat_id):
+    if chat_id > 0:
+        return {"id": chat_id, "type": "private", "first_name": "Ali", "last_name": "Valiyev",
+                "username": "ali_v"}
+    return {"id": chat_id, "type": "supergroup", "title": "Audit"}
+
+
 def message(chat_id, text, update_id=1):
-    return {"update_id": update_id, "message": {"chat": {"id": chat_id}, "text": text}}
+    return {"update_id": update_id, "message": {"chat": chat_of(chat_id), "text": text}}
 
 
 async def settle(bot):
@@ -80,7 +90,7 @@ def test_export_sends_summary_xlsx_and_json(make_settings):
     world.platform.add(kind="client", event="console.warn", level="warning", source="web")
     world.tender.add(tur="kirish", hodisa="kirish_rad", login="tender", holat_kodi=401)
 
-    run_commands(world, "/loglar bugun")
+    run_commands(world, "/logs today")
 
     texts = world.tg.messages(111)
     assert texts[0].startswith("⏳ Tayyorlanmoqda: 05.10.2026 00:00 — 05.10.2026 14:00")
@@ -107,11 +117,11 @@ def test_export_with_filters_and_bodies(make_settings):
     world.platform.add(level="error", request_body='{"q":2}', response_body="boom2")
     world.platform.add(level="info")
 
-    run_commands(world, "/loglar bugun xatolar xizmat=platforma tanalar")
+    run_commands(world, "/logs today errors service=platform bodies")
 
     assert world.tender.calls == []
     summary = world.tg.messages(111)[1]
-    assert "Filtr: faqat xatolar, xizmat=platforma, tanalar bilan" in summary
+    assert "Filtr: errors, service=platform, bodies" in summary
     assert "Tanalar birinchi 1 ta yozuv uchun olindi." in summary
     doc = json.loads(world.tg.documents[1]["content"])
     rows = doc["platforma"]["yozuvlar"]
@@ -125,7 +135,7 @@ def test_export_with_filters_and_bodies(make_settings):
 
 def test_nothing_found(make_settings):
     world = World(make_settings())
-    run_commands(world, "/loglar kecha")
+    run_commands(world, "/logs yesterday")
     assert world.tg.messages(111)[-1] == "Bu oraliqda hech narsa topilmadi."
     assert world.tg.documents == []
 
@@ -134,7 +144,7 @@ def test_one_source_failing_does_not_stop_the_other(make_settings):
     world = World(make_settings())
     world.tender.password = "a-different-one-of-24-chars"
     world.platform.add()
-    run_commands(world, "/loglar bugun")
+    run_commands(world, "/logs today")
     summary = world.tg.messages(111)[1]
     assert "tender-v2: o'qib bo'lmadi (login yoki parol rad etildi (401))" in summary
     assert len(world.tg.documents) == 2
@@ -143,21 +153,21 @@ def test_one_source_failing_does_not_stop_the_other(make_settings):
 def test_tender_disabled(make_settings):
     world = World(make_settings(), tender=False)
     world.platform.add()
-    run_commands(world, "/loglar bugun")
+    run_commands(world, "/logs today")
     assert "tender-v2 o'chirilgan" in world.tg.messages(111)[1]
     assert load_workbook(io.BytesIO(world.tg.documents[0]["content"])).sheetnames == ["Xulosa", "Platforma"]
 
 
 def test_bad_request_and_help(make_settings):
     world = World(make_settings())
-    run_commands(world, "/loglar ertaga", "/yordam", "/loglar", "/start@ShaffofAuditBot")
+    run_commands(world, "/logs tomorrow", "/help", "/logs", "/start@ShaffofAuditBot")
     texts = world.tg.messages(111)
-    assert texts[0].startswith("❓ Tushunilmadi: ertaga")
-    assert "<b>/loglar</b>" in texts[1] and "birinchi 300 ta" in texts[1]
+    assert texts[0].startswith("❓ Tushunilmadi: tomorrow")
+    assert "<b>/logs</b>" in texts[1] and "birinchi 300 ta" in texts[1]
     assert texts[2].startswith("Qaysi oraliq?")
-    assert "<b>/loglar</b>" in texts[3]
+    assert "<b>/logs</b>" in texts[3]
     keyboards = [m.get("reply_markup") for m in world.tg.sent]
-    assert keyboards[1]["inline_keyboard"][0][0] == {"text": "Oxirgi 1 soat", "callback_data": "q:1soat"}
+    assert keyboards[1]["inline_keyboard"][0][0] == {"text": "Oxirgi 1 soat", "callback_data": "q:1h"}
 
 
 def test_quick_button_runs_an_export(make_settings):
@@ -167,28 +177,166 @@ def test_quick_button_runs_an_export(make_settings):
     async def go():
         bot = world.bot()
         await bot.handle({"update_id": 1, "callback_query": {
-            "id": "cb1", "data": "q:bugun", "message": {"chat": {"id": 111}}}})
+            "id": "cb1", "data": "q:today", "message": {"chat": {"id": 111}}}})
         await settle(bot)
     asyncio.run(go())
     assert len(world.tg.documents) == 2
 
 
-def test_strangers_are_ignored_but_may_ask_their_id(make_settings, caplog):
+def test_a_stranger_becomes_a_request_and_waits(make_settings, caplog):
     world = World(make_settings())
     world.platform.add()
     caplog.set_level(logging.INFO)
-    run_commands(world, "/loglar bugun", "/yordam", "/id", "/id", chat_id=999)
-    assert world.tg.messages(999) == ["Shu chatning ID raqami: <code>999</code>"]   # /id once per 10 s
-    assert world.tg.documents == [] and world.platform.calls == []
-    assert "not in ALLOWED_CHAT_IDS" in caplog.text
+    run_commands(world, "/logs today", "/help", "/id", "/id", chat_id=999)
+    row = world.platform.chats[999]
+    assert row["status"] == "pending" and row["title"] == "Ali Valiyev" and row["username"] == "ali_v"
+    texts = world.tg.messages(999)
+    assert texts[0].startswith("⏳ Botdan foydalanish so'rovingiz administratorlarga yuborildi")
+    assert "<code>999</code>" in texts[0]
+    assert texts[1:] == ["Shu chatning ID raqami: <code>999</code>"]   # reminder once; /id once per 10 s
+    notices = [t for t in world.tg.messages(-1002) if "so'rovi" in t]
+    assert len(notices) == 1 and "Ali Valiyev" in notices[0] and "shaxsiy chat" in notices[0]
+    assert "@ali_v" in notices[0] and "<code>999</code>" in notices[0]
+    assert world.tg.documents == [] and world.platform.calls == []      # no log was read
+    assert "/logs from chat 999 (unknown)" in caplog.text
     # A forged button press from a stranger does nothing either.
     async def go():
         bot = world.bot()
         await bot.handle({"update_id": 9, "callback_query": {
-            "id": "cb", "data": "q:bugun", "message": {"chat": {"id": 999}}}})
+            "id": "cb", "data": "q:today", "message": {"chat": chat_of(999)}}})
         await settle(bot)
     asyncio.run(go())
     assert world.tg.documents == []
+
+
+def test_a_person_writing_without_a_command_is_a_request_too(make_settings):
+    world = World(make_settings())
+    run_commands(world, "salom", chat_id=998)
+    assert world.platform.chats[998]["status"] == "pending"
+    assert world.tg.messages(998)[0].startswith("⏳")
+
+
+def test_group_chatter_is_ignored(make_settings):
+    world = World(make_settings())
+    run_commands(world, "hello everyone", chat_id=-777)
+    assert world.tg.sent == [] and world.platform.chats.get(-777) is None
+
+
+def test_approval_works_on_the_next_command(make_settings):
+    world = World(make_settings())
+    world.platform.add()
+
+    async def go():
+        bot = world.bot()
+        await bot.handle(message(555, "/logs today", 1))
+        await settle(bot)
+        world.platform.chats[555]["status"] = "approved"        # the admin, in the dashboard
+        world.clock.t += 6
+        await bot.handle(message(555, "/logs today", 2))
+        await settle(bot)
+    asyncio.run(go())
+    assert len([d for d in world.tg.documents if d["chat_id"] == 555]) == 2
+
+
+def test_revoked_within_a_minute_and_blocked_is_silent(make_settings):
+    world = World(make_settings())
+    world.platform.add()
+
+    async def go():
+        bot = world.bot()
+        await bot.handle(message(111, "/status", 1))
+        world.platform.chats[111]["status"] = "blocked"
+        world.clock.t += 61
+        await bot.handle(message(111, "/logs today", 2))
+        await bot.handle(message(111, "/id", 3))
+        await settle(bot)
+    asyncio.run(go())
+    texts = world.tg.messages(111)
+    assert len(texts) == 2 and texts[0].startswith("🩺") and texts[1].startswith("Shu chatning ID")
+    assert world.tg.documents == []
+    assert not [t for t in world.tg.messages(-1002) if "so'rovi" in t]   # no new request either
+
+
+def test_bot_added_to_a_group_and_removed(make_settings):
+    world = World(make_settings())
+    group = {"id": -100777, "type": "supergroup", "title": "Ops <team>"}
+
+    def member(status):
+        return {"update_id": 1, "my_chat_member": {
+            "chat": group, "from": {"id": 5}, "old_chat_member": {}, 
+            "new_chat_member": {"status": status, "user": {"id": 42, "is_bot": True}}}}
+
+    async def go():
+        bot = world.bot()
+        await bot.handle(member("member"))
+        await bot.handle(member("left"))
+    asyncio.run(go())
+    row = world.platform.chats[-100777]
+    assert row["status"] == "pending" and row["bot_member"] is False and row["title"] == "Ops <team>"
+    assert world.tg.messages(-100777)[0].startswith("⏳")
+    notice = [t for t in world.tg.messages(-1002) if "so'rovi" in t][0]
+    assert "Ops &lt;team&gt; — guruh" in notice
+
+
+def test_group_upgraded_to_supergroup_keeps_its_approval(make_settings):
+    world = World(make_settings())
+    world.platform.chat(-500, chat_type="group", title="Old", alerts=True)
+    upgrade = {"update_id": 1, "message": {"chat": {"id": -100500, "type": "supergroup",
+                                                    "title": "Old"},
+                                           "migrate_from_chat_id": -500}}
+
+    async def go():
+        bot = world.bot()
+        await bot.handle(upgrade)
+        return bot
+    bot = asyncio.run(go())
+    assert -500 not in world.platform.chats
+    assert world.platform.chats[-100500]["status"] == "approved"
+    assert bot.chats.known[-100500]["alerts"] is True and -500 not in bot.chats.known
+
+
+def test_an_alert_chat_that_blocked_the_bot_is_marked_and_skipped(make_settings):
+    world = World(make_settings())
+    world.platform.chat(222, alerts=True)
+    world.tg.blocked_by.add(222)
+
+    async def go():
+        bot = world.bot()
+        await bot.broadcast(["first"])
+        await bot.broadcast(["second"])
+    asyncio.run(go())
+    assert world.platform.chats[222]["bot_member"] is False
+    assert world.tg.messages(-1002) == ["first", "second"]
+    reports = [c for c in world.platform.chat_calls if c["path"].endswith("/seen")]
+    assert len(reports) == 1 and reports[0]["body"]["bot_member"] is False
+
+
+def test_gateway_down_alerts_still_reach_the_last_known_chats(make_settings):
+    world = World(make_settings())
+
+    async def first():
+        await world.bot().chats.refresh()             # a run that read the list, then stopped
+    asyncio.run(first())
+    world.platform.chats_fail_with = 500
+
+    async def second():
+        bot = world.bot()
+        await bot.broadcast(["⚠️ platform down"])
+        await bot.handle(message(997, "/start", 1))   # a stranger meanwhile
+    asyncio.run(second())
+    assert world.tg.messages(-1002) == ["⚠️ platform down"]
+    assert world.tg.messages(997)[0].startswith("⚠️ Bot hozir platformaga ulana olmayapti")
+
+
+def test_no_alert_chat_means_no_alert(make_settings, caplog):
+    world = World(make_settings())
+    world.platform.chats[-1002]["alerts"] = False
+    caplog.set_level(logging.INFO)
+
+    async def go():
+        await world.bot().broadcast(["x"])
+    asyncio.run(go())
+    assert world.tg.sent == [] and "no approved chat has alerts on" in caplog.text
 
 
 def test_one_export_per_chat_at_a_time(make_settings):
@@ -197,8 +345,8 @@ def test_one_export_per_chat_at_a_time(make_settings):
 
     async def go():
         bot = world.bot()
-        await bot.handle(message(111, "/loglar bugun", 1))
-        await bot.handle(message(111, "/loglar kecha", 2))
+        await bot.handle(message(111, "/logs today", 1))
+        await bot.handle(message(111, "/logs yesterday", 2))
         await settle(bot)
     asyncio.run(go())
     assert any("Oldingi so'rov hali tayyorlanmoqda" in t for t in world.tg.messages(111))
@@ -208,16 +356,17 @@ def test_one_export_per_chat_at_a_time(make_settings):
 def test_status(make_settings):
     world = World(make_settings())
     world.platform.add()
-    run_commands(world, "/holat")
+    run_commands(world, "/status")
     text = world.tg.messages(111)[0]
     assert "Platforma: ✅ ishlayapti, oxirgi yozuv #1" in text
     assert "tender-v2: ✅ ishlayapti, oxirgi yozuv #0" in text
     assert "Ogohlantirishlar: yoqilgan" in text
+    assert "Chatlar: 2 ta ruxsat etilgan, 1 tasi ogohlantirish oladi, 0 ta so'rov kutmoqda" in text
 
 
 def test_poll_loop_reads_updates_and_moves_the_offset(make_settings):
     world = World(make_settings())
-    world.tg.updates = [message(111, "/id", 41), message(111, "/holat", 42)]
+    world.tg.updates = [message(111, "/id", 41), message(111, "/status", 42)]
 
     async def go():
         bot = world.bot()
@@ -259,13 +408,15 @@ def test_alerts_start_at_the_end_then_report_new_rows(make_settings):
     bot = asyncio.run(go())
 
     texts = world.tg.messages(-1002)
-    assert len(texts) == 3 and world.tg.messages(111) == []     # alerts go to ALERT_CHAT_IDS only
+    assert len(texts) == 3 and world.tg.messages(111) == []     # only to chats with alerts on
     assert "Server xatosi 502" in texts[0] and "TimeoutError" in texts[0]
     assert "Brauzer xatolari" in texts[1]
     assert "tender-v2 server xatosi 500" in texts[2]
 
     saved = json.load(open(world.settings.state_path))
-    assert saved == {"platform_after_id": 3, "tender_after_id": 2}
+    assert {k: saved[k] for k in ("platform_after_id", "tender_after_id")} == {
+        "platform_after_id": 3, "tender_after_id": 2}
+    assert saved["chats"]["-1002"]["alerts"] is True           # the chat list is kept too
 
 
 def test_alert_cursor_survives_a_restart(make_settings):
@@ -326,11 +477,14 @@ def test_source_down_and_back(make_settings):
 
 
 def test_refused_credentials_wait_ten_minutes(make_settings):
-    world = World(make_settings(platform_password="wrong-one"))
-    world.platform.password = "right-one"
+    """Someone changed the bot's password on the platform: the follow loop backs
+    off, and the alert still reaches the chats the bot knew before."""
+    world = World(make_settings())
 
     async def go():
         bot = world.bot()
+        await bot.chats.refresh()
+        world.platform.password = "changed-in-the-dashboard"
         f = bot.followers[0]
         await bot.follow_one(f)
         return f
@@ -362,8 +516,8 @@ def test_token_never_logged(make_settings, caplog):
 
 def test_user_text_is_escaped_in_replies(make_settings):
     world = World(make_settings())
-    run_commands(world, "/loglar <b>")
-    assert world.tg.messages(111) == ["❓ Tushunilmadi: &lt;b&gt;\n\nYordam: /yordam"]
+    run_commands(world, "/logs <b>")
+    assert world.tg.messages(111) == ["❓ Tushunilmadi: &lt;b&gt;\n\nYordam: /help"]
 
 
 def test_markup_telegram_refuses_goes_again_as_plain_text(make_settings):
@@ -381,7 +535,7 @@ def test_big_json_is_zipped_and_too_big_files_explained(make_settings, monkeypat
     world = World(make_settings())
     for i in range(200):
         world.platform.add(message="the same words again " * 3, username=f"user{i % 5}@misol.uz")
-    run_commands(world, "/loglar bugun xizmat=platforma")
+    run_commands(world, "/logs today service=platform")
     names = [d["filename"] for d in world.tg.documents]
     assert names == ["loglar_20261005-0000_20261005-1400.json.zip"]
     import zipfile
@@ -389,3 +543,43 @@ def test_big_json_is_zipped_and_too_big_files_explained(make_settings, monkeypat
         doc = json.loads(zf.read("loglar_20261005-0000_20261005-1400.json"))
     assert doc["platforma"]["yozuvlar_soni"] == 200
     assert any("juda katta" in t and ".xlsx" in t for t in world.tg.messages(111))
+
+
+def test_commands_are_registered_in_english(make_settings):
+    world = World(make_settings())
+    calls = []
+
+    async def record(commands):
+        calls.append([c for c, _ in commands])
+        raise asyncio.CancelledError
+
+    async def go():
+        bot = world.bot()
+        bot.tg.commands = record
+        try:
+            await bot.run()
+        except asyncio.CancelledError:
+            pass
+    asyncio.run(go())
+    assert calls == [["logs", "status", "help", "id"]]
+
+
+def test_old_uzbek_commands_do_nothing(make_settings):
+    world = World(make_settings())
+    world.platform.add()
+    run_commands(world, "/loglar bugun", "/holat", "/yordam")
+    assert world.tg.sent == [] and world.tg.documents == []
+
+
+def test_a_just_approved_alert_group_hears_of_the_next_request(make_settings):
+    world = World(make_settings())
+    world.platform.chats[-1002]["status"] = "pending"
+
+    async def go():
+        bot = world.bot()
+        await bot.chats.refresh()
+        world.platform.chats[-1002]["status"] = "approved"      # the admin, a moment later
+        world.clock.t += 6
+        await bot.handle(message(996, "/start", 1))
+    asyncio.run(go())
+    assert any("so'rovi" in t for t in world.tg.messages(-1002))

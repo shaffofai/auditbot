@@ -5,8 +5,10 @@ A Telegram bot that sends the platform's audit trail to a chat:
 - **on request** — `/logs <range> [filters]` answers with a short summary and
   two files: an Excel workbook (one sheet per source) and a JSON file;
 - **as it happens** — alerts for server errors, backend errors, repeated failed
-  sign-ins, browser script errors, lost or deleted audit rows and tender-v2
-  operator commands.
+  sign-ins, browser script errors, lost or deleted audit rows, tender-v2
+  operator commands, and every tender-v2 participant file whose tender has no
+  customer form (tender, type, file_id, uploader number, link — one message
+  per file).
 
 It reads two sources, both over HTTP on the platform's Docker network:
 

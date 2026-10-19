@@ -11,7 +11,9 @@ hands every new row to :class:`Alerts`. What makes a message:
             the trail);
   tender-v2 a request answered 5xx; a log line at level error; one login
             refused N times within the window; journal rows dropped; an
-            operator command (--requeue, --qayta-och).
+            operator command (--requeue, --qayta-och); a participant file
+            whose tender has no customer form (``hodisa=shablon_topilmadi``,
+            one message per file, not folded).
 
 The same thing happening again within the window is counted, not repeated: the
 next message about it, after the window, says how many times it was suppressed.
@@ -205,6 +207,19 @@ class Alerts:
                 messages.append(f"⚠️ <b>tender-v2 jurnal yozuvlari tashlandi</b>\n"
                                 f"{_e(_clip(row.get('xabar'), 300))}\n"
                                 f"{self._when(row.get('yaratildi'))} · #{row.get('id')}")
+            elif tur == "log" and row.get("hodisa") == "shablon_topilmadi":
+                # One message per participant file, never folded: each one is a
+                # participant who was told the customer's files are missing.
+                q = row.get("qoshimcha") or {}
+                messages.append(
+                    f"📁 <b>tender-v2: buyurtmachi fayli topilmadi</b>\n"
+                    f"Tender: <b>{_e(q.get('tender_id'))}</b> · {_e(q.get('type'))}\n"
+                    f"Ishtirokchi (yuklagan foydalanuvchi ID): "
+                    f"{_e(q.get('foydalanuvchi') or '—')}\n"
+                    f"file_id: {_e(q.get('file_id'))} · fayl #{_e(q.get('fayl_id'))}\n"
+                    f"Havola: {_e(_clip(q.get('link'), 300))}\n"
+                    f"Ishtirokchiga: status 4 — «{_e(q.get('izoh'))}»\n"
+                    f"{self._when(row.get('yaratildi'))} · #{row.get('id')}")
             elif tur == "log" and row.get("daraja") == "error":
                 line = _first_line(row.get("xabar"))
                 send, again = self._once(("tlog", row.get("manba"), line[:120]))

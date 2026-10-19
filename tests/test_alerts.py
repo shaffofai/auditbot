@@ -120,6 +120,26 @@ def test_tender_rules():
     assert "operator amali" in out[4] and "requeue" in out[4]
 
 
+def test_tender_customer_form_missing_one_message_per_file():
+    alerts, _ = make()
+    q = {"tender_id": 296436, "type": "excel2", "file_id": 2974094, "fayl_id": "15549",
+         "foydalanuvchi": "16677", "izoh": "Ushbu lot uchun buyurtmachi fayllari topilmadi.",
+         "link": "https://apisitender.mc.uz/storage/296436/excel2/16677/80c7.xlsx"}
+    rows = [{"id": 10 + i, "tur": "log", "hodisa": "shablon_topilmadi", "daraja": "warning",
+             "manba": "worker", "xabar": "[shablon yo'q] …", "yaratildi": "2026-10-17T04:22:55Z",
+             "qoshimcha": dict(q, fayl_id=str(15549 + i))} for i in range(3)]
+    out = alerts.tender(rows)
+    assert len(out) == 3                                       # not folded
+    assert "buyurtmachi fayli topilmadi" in out[0]
+    assert "296436" in out[0] and "excel2" in out[0] and "16677" in out[0]
+    assert "2974094" in out[0] and "#15549" in out[0] and "#15551" in out[2]
+    assert "Ushbu lot uchun buyurtmachi fayllari topilmadi." in out[0]
+    assert "09:22:55" in out[0]                                # Tashkent time
+    no_user = alerts.tender([{"id": 20, "tur": "log", "hodisa": "shablon_topilmadi",
+                              "qoshimcha": dict(q, foydalanuvchi=None)}])
+    assert "ID): —" in no_user[0]
+
+
 def test_limit_per_minute():
     alerts, clock = make(max_per_minute=4)
     out = alerts.limit([f"m{i}" for i in range(10)])
